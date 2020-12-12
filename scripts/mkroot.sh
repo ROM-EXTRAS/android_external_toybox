@@ -25,7 +25,7 @@ if [ ! -z "$CROSS" ]; then
   if [ "${CROSS::3}" == all ]; then
     for i in $(ls "$CCC" | sed -n 's/-.*//p' | sort -u | xargs); do
       { rm -f "$LOG/$i-log".{failed,success}
-        "$0" "$@" CROSS=$i ; [ $((X=$?)) -eq 0 ] && mv "$LOG/$i".{txt,success}
+        "$0" "$@" CROSS=$i ; [ $? -eq 0 ] && mv "$LOG/$i".{txt,success}
       } |& tee "$LOG/$i.txt"
       [ ! -e "$LOG/$i.success" ] &&
         { mv "$LOG/$i".{txt,failed};[ "$CROSS" != allnonstop ] && exit 1; }
@@ -74,16 +74,17 @@ cat > "$ROOT"/init << 'EOF' &&
 
 export HOME=/home PATH=/bin:/sbin
 
-mountpoint -q proc || mount -t proc proc proc
-mountpoint -q sys || mount -t sysfs sys sys
 if ! mountpoint -q dev; then
   mount -t devtmpfs dev dev || mdev -s
+  [ $$ -eq 1 ] && exec >/dev/console 2>&1
   for i in ,fd /0,stdin /1,stdout /2,stderr
   do ln -sf /proc/self/fd${i/,*/} dev/${i/*,/}; done
   mkdir -p dev/{shm,pts}
   mountpoint -q dev/pts || mount -t devpts dev/pts dev/pts
   chmod +t /dev/shm
 fi
+mountpoint -q proc || mount -t proc proc proc
+mountpoint -q sys || mount -t sysfs sys sys
 
 if [ $$ -eq 1 ]; then # Setup networking for QEMU (needs /proc)
   ifconfig lo 127.0.0.1
@@ -97,6 +98,7 @@ if [ $$ -eq 1 ]; then # Setup networking for QEMU (needs /proc)
 
   [ -z "$CONSOLE" ] && CONSOLE="$(</sys/class/tty/console/active)"
   [ -z "$HANDOFF" ] && HANDOFF=/bin/sh && echo Type exit when done.
+  echo 3 > /proc/sys/kernel/printk
   exec oneit -c /dev/"${CONSOLE:-console}" $HANDOFF
 else # for chroot
   /bin/sh
@@ -116,8 +118,9 @@ echo -e 'root:x:0:\nguest:x:500:\nnobody:x:65534:' > "$ROOT"/etc/group || exit 1
 
 # Build static toybox with existing .config if there is one, else defconfig+sh
 announce toybox
-[ -e .config ] && CONF=silentoldconfig || unset CONF
-make clean ${CONF:-defconfig KCONFIG_ALLCONFIG=<(echo $'CONFIG_SH=y\nCONFIG_ROUTE=y')} &&
+[ -e .config ] && [ -z "$PENDING" ] && CONF=silentoldconfig || unset CONF
+for i in $PENDING sh route; do XX="$XX"$'\n'CONFIG_${i^^?}=y; done
+make clean ${CONF:-defconfig KCONFIG_ALLCONFIG=<(echo "$XX")} &&
 LDFLAGS=--static PREFIX="$ROOT" make toybox install || exit 1
 
 # Build any packages listed on command line
@@ -193,7 +196,7 @@ CONFIG_CMDLINE="console=ttyUL0 earlycon"' BUILTIN=1
     KERNEL_CONFIG="CONFIG_MEMORY_START=0x0c000000"
     KCONF=CPU_SUBTYPE_SH7751R,MMU,VSYSCALL,SH_FPU,SH_RTS7751R2D,RTS7751R2D_PLUS,SERIAL_SH_SCI,SERIAL_SH_SCI_CONSOLE,PCI,NET_VENDOR_REALTEK,8139CP,PCI,BLK_DEV_SD,ATA,ATA_SFF,ATA_BMDMA,PATA_PLATFORM,BINFMT_ELF_FDPIC,BINFMT_FLAT
 #see also SPI SPI_SH_SCI MFD_SM501 RTC_CLASS RTC_DRV_R9701 RTC_DRV_SH RTC_HCTOSYS
-  else die "Unknown \$TARGET"
+  else die "Unknown \$TARGET $TARGET"
   fi
 
   # Write the qemu launch script
@@ -201,7 +204,7 @@ CONFIG_CMDLINE="console=ttyUL0 earlycon"' BUILTIN=1
     [ -z "$BUILTIN" ] && INITRD="-initrd ${CROSS_BASE}root.cpio.gz"
     echo qemu-system-"$QEMU" '"$@"' $QEMU_MORE -nographic -no-reboot -m 256 \
          -kernel $(basename $VMLINUX) $INITRD \
-         "-append \"quiet panic=1 HOST=$TARGET console=$KARGS \$KARGS\"" \
+         "-append \"panic=1 HOST=$TARGET console=$KARGS \$KARGS\"" \
          ${DTB:+-dtb "$(basename "$DTB")"} ";echo -e '\e[?7h'" \
          > "$OUTPUT/qemu-$TARGET.sh" &&
     chmod +x "$OUTPUT/qemu-$TARGET.sh" || exit 1
@@ -243,6 +246,6 @@ fi
 
 # clean up and package root filesystem for initramfs.
 [ -z "$BUILTIN" ] && announce "${CROSS_BASE}root.cpio.gz" &&
-  (cd "$ROOT" && find . | cpio -o -H newc --no-preserve-owner | gzip) \
+  (cd "$ROOT" && find . | cpio -o -H newc ${CROSS_COMPILE:+--no-preserve-owner} | gzip) \
     > "$OUTPUT/$CROSS_BASE"root.cpio.gz
 rmdir "$MYBUILD" "$BUILD" 2>/dev/null # remove if empty

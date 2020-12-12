@@ -74,11 +74,11 @@ void get_optflags(void);
 // Don't warn about failure to stat
 #define DIRTREE_SHUTUP      16
 // Breadth first traversal, conserves filehandles at the expense of memory
-#define DIRTREE_BREADTH     32
+#define DIRTREE_BREADTH     32 // TODO not implemented yet
 // skip non-numeric entries
 #define DIRTREE_PROC        64
 // Return files we can't stat
-#define DIRTREE_STATLESS    128
+#define DIRTREE_STATLESS   128
 // Don't look at any more files in this directory.
 #define DIRTREE_ABORT      256
 
@@ -127,12 +127,13 @@ char *xstrndup(char *s, size_t n);
 char *xstrdup(char *s);
 void *xmemdup(void *s, long len);
 char *xmprintf(char *format, ...) printf_format;
+void xflush(int flush);
 void xprintf(char *format, ...) printf_format;
 void xputsl(char *s, int len);
 void xputsn(char *s);
 void xputs(char *s);
 void xputc(char c);
-void xflush(int flush);
+void xvdaemon(void);
 void xexec(char **argv);
 pid_t xpopen_setup(char **argv, int *pipes, void (*callback)(char **argv));
 pid_t xpopen_both(char **argv, int *pipes);
@@ -229,6 +230,7 @@ long long xstrtol(char *str, char **end, int base);
 long long atolx(char *c);
 long long atolx_range(char *numstr, long long low, long long high);
 int stridx(char *haystack, char needle);
+int wctoutf8(char *s, unsigned wc);
 int utf8towc(wchar_t *wc, char *str, unsigned len);
 char *strlower(char *s);
 char *strafter(char *haystack, char *needle);
@@ -275,10 +277,12 @@ unsigned tar_cksum(void *data);
 int is_tar_header(void *pkt);
 char *elf_arch_name(int type);
 
-#define HR_SPACE 1 // Space between number and units
-#define HR_B     2 // Use "B" for single byte units
-#define HR_1000  4 // Use decimal instead of binary units
-int human_readable_long(char *buf, unsigned long long num, int dgt, int style);
+#define HR_SPACE  1 // Space between number and units
+#define HR_B      2 // Use "B" for single byte units
+#define HR_1000   4 // Use decimal instead of binary units
+#define HR_NODOT  8 // No tenths for single digit units
+int human_readable_long(char *buf, unsigned long long num, int dgt, int unit,
+  int style);
 int human_readable(char *buf, unsigned long long num, int style);
 
 // env.c
