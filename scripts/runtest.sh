@@ -121,11 +121,10 @@ testing()
   # Catch segfaults
   [ $RETVAL -gt 128 ] && [ $RETVAL -lt 255 ] &&
     echo "exited with signal (or returned $RETVAL)" >> actual
-
-  DIFF="$(diff -au${NOSPACE:+b} expected actual)"
+  DIFF="$(diff -au${NOSPACE:+w} expected actual)"
   if [ ! -z "$DIFF" ]
   then
-    FAILCOUNT=$[$FAILCOUNT+1]
+    FAILCOUNT=$(($FAILCOUNT+1))
     printf "%s\n" "$SHOWFAIL: $NAME"
     if [ -n "$VERBOSE" ]
     then
@@ -150,7 +149,7 @@ testcmd()
 
   X="$1"
   [ -z "$X" ] && X="$CMDNAME $2"
-  testing "$X" "$C $2" "$3" "$4" "$5"
+  testing "$X" "\"$C\" $2" "$3" "$4" "$5"
 }
 
 # Recursively grab an executable and all the libraries needed to run it.

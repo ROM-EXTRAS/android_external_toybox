@@ -2,17 +2,25 @@
 
 # Grab default values for $CFLAGS and such.
 
+if [ ! -z "$ASAN" ]; then
+  # Turn ASan on.
+  CFLAGS="-fsanitize=address $CFLAGS"
+  # Optional, but effectively necessary if you want useful backtraces.
+  CFLAGS="-O1 -g -fno-omit-frame-pointer -fno-optimize-sibling-calls $CFLAGS"
+fi
+
 export LANG=c
 export LC_ALL=C
 set -o pipefail
 source scripts/portability.sh
 
 [ -z "$KCONFIG_CONFIG" ] && KCONFIG_CONFIG=.config
-[ -z "$OUTNAME" ] && OUTNAME=toybox
+[ -z "$OUTNAME" ] && OUTNAME=toybox"${TARGET:+-$TARGET}"
 UNSTRIPPED="generated/unstripped/$(basename "$OUTNAME")"
 
 # Try to keep one more cc invocation going than we have processors
-[ -z "$CPUS" ] && CPUS=$(($(nproc 2>/dev/null)+1))
+[ -z "$CPUS" ] && \
+  CPUS=$(($(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null)+1))
 
 # Respond to V= by echoing command lines as well as running them
 DOTPROG=
@@ -151,7 +159,7 @@ then
     $KCONFIG_CONFIG > generated/config.h || exit 1
 fi
 
-if [ generated/mkflags -ot scripts/mkflags.c ]
+if [ ! -f generated/mkflags ] || [ generated/mkflags -ot scripts/mkflags.c ]
 then
   do_loudly $HOSTCC scripts/mkflags.c -o generated/mkflags || exit 1
 fi
@@ -235,7 +243,7 @@ then
   ) > generated/globals.h
 fi
 
-if [ generated/mktags -ot scripts/mktags.c ]
+if [ ! -f generated/mktags ] || [ generated/mktags -ot scripts/mktags.c ]
 then
   do_loudly $HOSTCC scripts/mktags.c -o generated/mktags || exit 1
 fi
@@ -248,7 +256,7 @@ then
     toys/*/*.c lib/*.c | generated/mktags > generated/tags.h
 fi
 
-if [ generated/config2help -ot scripts/config2help.c ]
+if [ ! -f generated/config2help ] || [ generated/config2help -ot scripts/config2help.c ]
 then
   do_loudly $HOSTCC scripts/config2help.c -o generated/config2help || exit 1
 fi
@@ -296,7 +304,7 @@ do
   # $LIBFILES doesn't need to be rebuilt if older than .config, $TOYFILES does
   # ($TOYFILES contents can depend on CONFIG symbols, lib/*.c never should.)
 
-  [ "$OUT" -nt "$i" ] && [ -z "$CLICK" -o "$OUT" -ot "$KCONFIG_CONFIG" ] &&
+  [ "$OUT" -nt "$i" ] && [ -z "$CLICK" -o "$OUT" -nt "$KCONFIG_CONFIG" ] &&
     continue
 
   do_loudly $BUILD -c $i -o $OUT &
@@ -331,7 +339,7 @@ do_loudly $BUILD $LNKFILES $LINK || exit 1
 if [ ! -z "$NOSTRIP" ] ||
   ! do_loudly ${CROSS_COMPILE}${STRIP} "$UNSTRIPPED" -o "$OUTNAME"
 then
-  echo "strip failed, using unstripped" &&
+  [ -z "$NOSTRIP" ] && echo "strip failed, using unstripped"
   rm -f "$OUTNAME" &&
   cp "$UNSTRIPPED" "$OUTNAME" ||
     exit 1

@@ -197,7 +197,7 @@ pid_t __attribute__((returns_twice)) xvforkwrap(pid_t pid)
   if (pid == -1) perror_exit("vfork");
 
   // Signal to xexec() and friends that we vforked so can't recurse
-  toys.stacktop = 0;
+  if (!pid) toys.stacktop = 0;
 
   return pid;
 }
@@ -237,24 +237,24 @@ pid_t xpopen_both(char **argv, int *pipes)
 
   if (!(pid = CFG_TOYBOX_FORK ? xfork() : XVFORK())) {
     // Child process: Dance of the stdin/stdout redirection.
-    // cestnepasun[1]->cestnepasun[0] and cestnepasun[2]->cestnepasun[1]
+    // cestnepasun[1]->cestnepasun[0] and cestnepasun[3]->cestnepasun[2]
     if (pipes) {
       // if we had no stdin/out, pipe handles could overlap, so test for it
       // and free up potentially overlapping pipe handles before reuse
 
-      // in child, close read end of output pipe, and return write end as out
+      // in child, close read end of output pipe, use write end as new stdout
       if (cestnepasun[2]) {
         close(cestnepasun[2]);
         pipes[1] = cestnepasun[3];
       }
 
-      // in child, close write end of input pipe, and return input end as out.
+      // in child, close write end of input pipe, use read end as new stdin
       if (cestnepasun[1]) {
         close(cestnepasun[1]);
         pipes[0] = cestnepasun[0];
       }
 
-      // If swapping stdin/stdout, need to move a filehandle to temp
+      // If swapping stdin/stdout, dup a filehandle that gets closed before use
       if (!pipes[1]) pipes[1] = dup(0);
 
       // Are we redirecting stdin?
@@ -316,7 +316,7 @@ int xwaitpid(pid_t pid)
 
   while (-1 == waitpid(pid, &status, 0) && errno == EINTR);
 
-  return WIFEXITED(status) ? WEXITSTATUS(status) : WTERMSIG(status)+127;
+  return WIFEXITED(status) ? WEXITSTATUS(status) : WTERMSIG(status)+128;
 }
 
 int xpclose_both(pid_t pid, int *pipes)
@@ -922,11 +922,18 @@ long long xparsemillitime(char *arg)
 // Compile a regular expression into a regex_t
 void xregcomp(regex_t *preg, char *regex, int cflags)
 {
-  int rc = regcomp(preg, regex, cflags);
+  int rc;
 
-  if (rc) {
+  // BSD regex implementations don't support the empty regex (which isn't
+  // allowed in the POSIX grammar), but glibc does. Fake it for BSD.
+  if (!*regex) {
+    regex = "()";
+    cflags |= REG_EXTENDED;
+  }
+
+  if ((rc = regcomp(preg, regex, cflags))) {
     regerror(rc, preg, libbuf, sizeof(libbuf));
-    error_exit("xregcomp: %s", libbuf);
+    error_exit("bad regex: %s", libbuf);
   }
 }
 
@@ -1044,4 +1051,19 @@ void xparsedate(char *str, time_t *t, unsigned *nano, int endian)
 
   if (oldtz) setenv("TZ", oldtz, 1);
   free(oldtz);
+}
+
+char *xgetline(FILE *fp, int *len)
+{
+  char *new = 0;
+  size_t linelen = 0;
+
+  errno = 0;
+  if (1>(linelen = getline(&new, &linelen, fp))) {
+    if (errno) perror_msg("getline");
+    new = 0;
+  } else if (new[linelen-1] == '\n') new[--linelen] = 0;
+  if (len) *len = linelen;
+
+  return new;
 }
