@@ -31,6 +31,8 @@ testing "gzip data" "file $FILES/tar/tar.tgz | sed 's|$FILES/||'" \
     "tar/tar.tgz: gzip compressed data\n" "" ""
 testing "bzip2 data" "file $FILES/tar/tar.tbz2 | sed 's|$FILES/||'" \
     "tar/tar.tbz2: bzip2 compressed data, block size = 900k\n" "" ""
+testing "7z file" "file $FILES/tar/tar.7z | sed 's|$FILES/||'" \
+    "tar/tar.7z: 7-zip archive data, version 0.4\n" "" ""
 testing "zip file" "file $FILES/zip/example.zip | sed 's|$FILES/||'" \
     "zip/example.zip: Zip archive data, requires at least v1.0 to extract\n" "" ""
 
@@ -54,7 +56,9 @@ testing "symlink -L" "file -L symlink" "symlink: Java class file, version 53.0 (
 testing "- pipe" "cat $FILES/java.class | file -" "-: Java class file, version 53.0 (Java 1.9)\n" "" ""
 testing "- redirect" "file - <$FILES/java.class" "-: Java class file, version 53.0 (Java 1.9)\n" "" ""
 
-testing "/dev/zero" "file /dev/zero" "/dev/zero: character special (1/5)\n" "" ""
+zero_dev="1/5"
+[ "$(uname)" == "Darwin" ] && zero_dev="3/3"
+testing "/dev/zero" "file /dev/zero" "/dev/zero: character special ($zero_dev)\n" "" ""
 testing "- </dev/zero" "file - </dev/zero" "-: data\n" "" ""
 
 rm empty bash.script bash.script2 env.python.script ascii android.dex

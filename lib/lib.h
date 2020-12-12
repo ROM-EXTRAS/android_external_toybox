@@ -107,7 +107,7 @@ struct dirtree *dirtree_read(char *path, int (*callback)(struct dirtree *node));
 
 // help.c
 
-void show_help(FILE *out);
+void show_help(FILE *out, int full);
 
 // Tell xopen and friends to print warnings but return -1 as necessary
 // The largest O_BLAH flag so far is arch/alpha's O_PATH at 0x800000 so
@@ -134,6 +134,7 @@ void xputs(char *s);
 void xputc(char c);
 void xflush(int flush);
 void xexec(char **argv);
+pid_t xpopen_setup(char **argv, int *pipes, void (*callback)(char **argv));
 pid_t xpopen_both(char **argv, int *pipes);
 int xwaitpid(pid_t pid);
 int xpclose_both(pid_t pid, int *pipes);
@@ -187,6 +188,7 @@ void xsignal(int signal, void *handler);
 time_t xvali_date(struct tm *tm, char *str);
 void xparsedate(char *str, time_t *t, unsigned *nano, int endian);
 char *xgetline(FILE *fp, int *len);
+time_t xmktime(struct tm *tm, int utc);
 
 // lib.c
 void verror_msg(char *msg, int err, va_list va);
@@ -208,6 +210,7 @@ off_t lskip(int fd, off_t offset);
 int mkpathat(int atfd, char *dir, mode_t lastmode, int flags);
 int mkpath(char *dir);
 struct string_list **splitpath(char *path, struct string_list **list);
+char *readfd(int fd, char *ibuf, off_t *plen);
 char *readfileat(int dirfd, char *name, char *buf, off_t *len);
 char *readfile(char *name, char *buf, off_t len);
 void msleep(long milliseconds);
@@ -231,6 +234,7 @@ char *strlower(char *s);
 char *strafter(char *haystack, char *needle);
 char *chomp(char *s);
 int unescape(char c);
+int unescape2(char **c, int echo);
 char *strend(char *str, char *suffix);
 int strstart(char **a, char *b);
 int strcasestart(char **a, char *b);
@@ -255,9 +259,6 @@ int qstrcmp(const void *a, const void *b);
 void create_uuid(char *uuid);
 char *show_uuid(char *uuid);
 char *next_printf(char *s, char **start);
-int dev_minor(int dev);
-int dev_major(int dev);
-int dev_makedev(int major, int minor);
 struct passwd *bufgetpwuid(uid_t uid);
 struct group *bufgetgrgid(gid_t gid);
 int readlinkat0(int dirfd, char *path, char *buf, int len);
@@ -269,10 +270,10 @@ char *getgroupname(gid_t gid);
 void do_lines(int fd, char delim, void (*call)(char **pline, long len));
 long long millitime(void);
 char *format_iso_time(char *buf, size_t len, struct timespec *ts);
-void reset_env(struct passwd *p, int clear);
 void loggit(int priority, char *format, ...);
 unsigned tar_cksum(void *data);
 int is_tar_header(void *pkt);
+char *elf_arch_name(int type);
 
 #define HR_SPACE 1 // Space between number and units
 #define HR_B     2 // Use "B" for single byte units
@@ -283,9 +284,11 @@ int human_readable(char *buf, unsigned long long num, int style);
 // env.c
 
 long environ_bytes();
-void xsetenv(char *name, char *val);
+char *xsetenv(char *name, char *val);
 void xunsetenv(char *name);
+char *xpop_env(char *name); // because xpopenv() looks like xpopen_v()
 void xclearenv(void);
+void reset_env(struct passwd *p, int clear);
 
 // linestack.c
 
@@ -400,9 +403,9 @@ void list_signals();
 
 mode_t string_to_mode(char *mode_str, mode_t base);
 void mode_to_string(mode_t mode, char *buf);
-char *getdirname(char *name);
 char *getbasename(char *name);
 char *fileunderdir(char *file, char *dir);
+char *relative_path(char *from, char *to);
 void names_to_pid(char **names, int (*callback)(pid_t pid, char *name),
     int scripts);
 

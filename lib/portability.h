@@ -103,7 +103,12 @@ char *dirname(char *path);
 char *__xpg_basename(char *path);
 static inline char *basename(char *path) { return __xpg_basename(path); }
 char *strcasestr(const char *haystack, const char *needle);
+void *memmem(const void *haystack, size_t haystack_length,
+  const void *needle, size_t needle_length);
 #endif // defined(glibc)
+
+// getopt_long(), getopt_long_only(), and struct option.
+#include <getopt.h>
 
 #if !defined(__GLIBC__)
 // POSIX basename.
@@ -201,9 +206,10 @@ ssize_t xattr_lset(const char*, const char*, const void*, size_t, int);
 ssize_t xattr_fset(int, const char*, const void*, size_t, int);
 #endif
 
-// macOS doesn't have mknodat, but we can fake it.
+// macOS doesn't have these functions, but we can fake them.
 #ifdef __APPLE__
 int mknodat(int, const char*, mode_t, dev_t);
+int posix_fallocate(int, off_t, off_t);
 #endif
 
 // Android is missing some headers and functions
@@ -286,8 +292,14 @@ static inline int __android_log_write(int pri, const char *tag, const char *msg)
 #endif
 
 // libprocessgroup is an Android platform library not included in the NDK.
-#if defined(__BIONIC__) && __has_include(<processgroup/sched_policy.h>)
+#if defined(__BIONIC__)
+#if __has_include(<processgroup/sched_policy.h>)
 #include <processgroup/sched_policy.h>
+#define GOT_IT
+#endif
+#endif
+#ifdef GOT_IT
+#undef GOT_IT
 #else
 static inline int get_sched_policy(int tid, void *policy) {return 0;}
 static inline char *get_sched_policy_name(int policy) {return "unknown";}
@@ -297,7 +309,6 @@ static inline char *get_sched_policy_name(int policy) {return "unknown";}
 // stub it out for now.
 #ifdef __ANDROID_NDK__
 #define __android_log_write(a, b, c) (0)
-#define adjtime(x, y) (0)
 #endif
 
 #ifndef SYSLOG_NAMES
@@ -341,3 +352,12 @@ struct signame {
   char *name;
 };
 void xsignal_all_killers(void *handler);
+
+// Different OSes encode major/minor device numbers differently.
+int dev_minor(int dev);
+int dev_major(int dev);
+int dev_makedev(int major, int minor);
+
+char *fs_type_name(struct statfs *statfs);
+
+int get_block_device_size(int fd, unsigned long long *size);

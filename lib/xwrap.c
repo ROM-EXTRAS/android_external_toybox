@@ -224,7 +224,7 @@ void xexec(char **argv)
 //           If -1, replace with pipe handle connected to stdin/stdout.
 //           NULL treated as {0, 1}, I.E. leave stdin/stdout as is
 // return: pid of child process
-pid_t xpopen_both(char **argv, int *pipes)
+pid_t xpopen_setup(char **argv, int *pipes, void (*callback)(char **argv))
 {
   int cestnepasun[4], pid;
 
@@ -269,6 +269,7 @@ pid_t xpopen_both(char **argv, int *pipes)
         close(pipes[1]);
       }
     }
+    if (callback) callback(argv);
     if (argv) xexec(argv);
 
     // In fork() case, force recursion because we know it's us.
@@ -286,6 +287,7 @@ pid_t xpopen_both(char **argv, int *pipes)
       // setting high bit of argv[0][0] to let new process know
       **toys.argv |= 0x80;
       execv(s, toys.argv);
+      if ((s = getenv("_"))) execv(s, toys.argv);
       perror_msg_raw(s);
 
       _exit(127);
@@ -308,6 +310,12 @@ pid_t xpopen_both(char **argv, int *pipes)
 
   return pid;
 }
+
+pid_t xpopen_both(char **argv, int *pipes)
+{
+  return xpopen_setup(argv, pipes, 0);
+}
+
 
 // Wait for child process to exit, then return adjusted exit code.
 int xwaitpid(pid_t pid)
@@ -373,7 +381,7 @@ int xcreate_stdio(char *path, int flags, int mode)
 {
   int fd = open(path, (flags^O_CLOEXEC)&~WARN_ONLY, mode);
 
-  if (fd == -1) ((mode&WARN_ONLY) ? perror_msg_raw : perror_exit_raw)(path);
+  if (fd == -1) ((flags&WARN_ONLY) ? perror_msg_raw : perror_exit_raw)(path);
   return fd;
 }
 
@@ -525,7 +533,8 @@ void xstat(char *path, struct stat *st)
 
 // Canonicalize path, even to file with one or more missing components at end.
 // Returns allocated string for pathname or NULL if doesn't exist
-// exact = 1 file must exist, 0 dir must exist, -1 show theoretical location
+// exact = 1 file must exist, 0 dir must exist, -1 show theoretical location,
+// -2 don't resolve last file
 char *xabspath(char *path, int exact)
 {
   struct string_list *todo, *done = 0;
@@ -570,7 +579,8 @@ char *xabspath(char *path, int exact)
     }
 
     // Is this a symlink?
-    len = readlinkat(dirfd, new->str, libbuf, sizeof(libbuf));
+    if (exact == -2 && !todo) len = 0;
+    else len = readlinkat(dirfd, new->str, libbuf, sizeof(libbuf));
     if (len>4095) goto error;
 
     // Not a symlink: add to linked list, move dirfd, fail if error
@@ -1057,13 +1067,27 @@ char *xgetline(FILE *fp, int *len)
 {
   char *new = 0;
   size_t linelen = 0;
+  long ll;
 
   errno = 0;
-  if (1>(linelen = getline(&new, &linelen, fp))) {
+  if (1>(ll = getline(&new, &linelen, fp))) {
     if (errno) perror_msg("getline");
     new = 0;
   } else if (new[linelen-1] == '\n') new[--linelen] = 0;
-  if (len) *len = linelen;
+  if (len) *len = ll;
 
   return new;
+}
+
+time_t xmktime(struct tm *tm, int utc)
+{
+  char *old_tz = utc ? xtzset("UTC0") : 0;
+  time_t result;
+
+  if ((result = mktime(tm)) < 0) error_exit("mktime");
+  if (utc) {
+    free(xtzset(old_tz));
+    free(old_tz);
+  }
+  return result;
 }

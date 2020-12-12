@@ -1,511 +1,248 @@
 #!/bin/bash
 
 # Clear environment variables by restarting script w/bare minimum passed through
-[ -z "$NOCLEAR" ] &&
-  exec env -i NOCLEAR=1 HOME="$HOME" PATH="$PATH" LINUX="$LINUX" \
-    CROSS_COMPILE="$CROSS_COMPILE" CROSS_SHORT="$CROSS_SHORT" "$0" "$@"
+[ -z "$NOCLEAR" ] && exec env -i NOCLEAR=1 HOME="$HOME" PATH="$PATH" \
+    "LINUX=$LINUX" "CROSS=$CROSS" CROSS_COMPILE="$CROSS_COMPILE" "$0" "$@"
 
-# assign command line NAME=VALUE args to env vars
-while [ $# -ne 0 ]
-do
-  X="${1/=*/}"
-  Y="${1#*=}"
-  [ "${1/=/}" != "$1" ] && eval "export $X=\"\$Y\"" || echo "unknown $i"
+# assign command line NAME=VALUE args to env vars, keeping rest as packages
+while [ $# -ne 0 ]; do
+  [ "${1/=/}" != "$1" ] && eval "export ${1/=*/}=\"\${1#*=}\"" ||
+    { [ "$1" != '--' ] && PKG="${PKG:-plumbing} $1"; }
   shift
 done
 
-# If we're cross compiling, set appropriate environment variables.
-if [ -z "$CROSS_COMPILE" ]
-then
-  echo "Building natively"
-  if ! cc --static -xc - -o /dev/null <<< "int main(void) {return 0;}"
-  then
-    echo "Warning: host compiler can't create static binaries." >&2
-    sleep 3
-  fi
-else
-  CROSS_PATH="$(dirname "$(which "${CROSS_COMPILE}cc")")"
-  CROSS_BASE="$(basename "$CROSS_COMPILE")"
-  [ -z "$CROSS_SHORT" ] && CROSS_SHORT="${CROSS_BASE/-*/}"
-  echo "Cross compiling to $CROSS_SHORT"
-  if [ -z "$CROSS_PATH" ]
-  then
-    echo "no ${CROSS_COMPILE}cc in path" >&2
-    exit 1
+die() { echo "$@" >&2; exit 1; }
+announce() { echo -e "\033]2;$CROSS $*\007\n=== $*"; }
+
+# Create target-independent working directories (cmdline can change locations)
+TOP="$PWD/root"
+mkdir -p ${BUILD:=$TOP/build} ${AIRLOCK:=$TOP/airlock} ${LOG:=$TOP/log} ||exit 1
+
+# set CROSS_COMPILE from $CROSS using ccc. Handle "all" w/log, list, and err chk
+if [ ! -z "$CROSS" ]; then
+  [ ! -d "${CCC:=$PWD/ccc}" ] && die "No ccc symlink to compiler directory."
+  CROSS_COMPILE="$(echo "$CCC/$CROSS"-*cross/bin/"$CROSS"*-cc | sed 's/cc$//')"
+  if [ "${CROSS::3}" == all ]; then
+    for i in $(ls "$CCC" | sed -n 's/-.*//p' | sort -u | xargs); do
+      { rm -f "$LOG/$i-log".{failed,success}
+        "$0" "$@" CROSS=$i ; [ $((X=$?)) -eq 0 ] && mv "$LOG/$i".{txt,success}
+      } |& tee "$LOG/$i.txt"
+      [ ! -e "$LOG/$i.success" ] &&
+        { mv "$LOG/$i".{txt,failed};[ "$CROSS" != allnonstop ] && exit 1; }
+    done
+    exit
+  elif [ ! -e "${CROSS_COMPILE}cc" ]; then
+    ls "$CCC" | sed -n 's/-.*//p' | sort -u | xargs
+    exit
   fi
 fi
 
-# set up directories (can override most of these paths on cmdline)
-TOP="$PWD/root"
-[ -z "$BUILD" ] && BUILD="$TOP/build"
-[ -z "$AIRLOCK" ] && AIRLOCK="$TOP/airlock"
-[ -z "$OUTPUT" ] && OUTPUT="$TOP/${CROSS_SHORT:-host}"
-[ -z "$ROOT" ] && ROOT="$OUTPUT/${CROSS_BASE}fs" && rm -rf "$ROOT"
+${CROSS_COMPILE}cc --static -xc - -o /dev/null <<< "int main(void){return 0;}"||
+  die "${CROSS_COMPILE}cc can't create static binaries"
+
+# Parse and sanity check $CROSS_COMPILE (if any)
+if [ ! -z "$CROSS_COMPILE" ]; then
+  CROSS_PATH="$(dirname "$(which "${CROSS_COMPILE}cc")")"
+  [ -z "$CROSS_PATH" ] && die "no ${CROSS_COMPILE}cc in path"
+  : ${CROSS_BASE:=$(basename "$CROSS_COMPILE")} ${CROSS:=${CROSS_BASE/-*/}}
+fi
+echo "Building for ${CROSS:=host}"
+
+# Create target-specific work/output directories
+: ${OUTPUT:=$TOP/$CROSS} ${PKGDIR:=$PWD/scripts/root}
 MYBUILD="$BUILD/${CROSS_BASE:-host-}tmp"
 rm -rf "$MYBUILD" && mkdir -p "$MYBUILD" || exit 1
+[ -z "$ROOT" ] && ROOT="$OUTPUT/fs" && rm -rf "$ROOT" # only blank if NOT set
 
-# Stabilize cross compiling by providing known $PATH contents
-if [ ! -z "$CROSS_COMPILE" ]
-then
-  if [ ! -e "$AIRLOCK/toybox" ]
-  then
-    echo === Create airlock dir
-
+# When cross compiling build everything under a host toybox with known behavior
+if [ ! -z "$CROSS_COMPILE" ]; then
+  if [ ! -e "$AIRLOCK/toybox" ]; then
+    announce "airlock"
     PREFIX="$AIRLOCK" KCONFIG_CONFIG="$TOP"/.airlock CROSS_COMPILE= \
-      make clean defconfig toybox install_airlock &&
-    rm "$TOP"/.airlock || exit 1
+      make clean defconfig toybox install_airlock && rm "$TOP"/.airlock ||exit 1
   fi
   export PATH="$CROSS_PATH:$AIRLOCK"
 fi
 
-### Create files and directories
+# Create new root filesystem's directory layout
 mkdir -p "$ROOT"/{etc,tmp,proc,sys,dev,home,mnt,root,usr/{bin,sbin,lib},var} &&
 chmod a+rwxt "$ROOT"/tmp && ln -s usr/{bin,sbin,lib} "$ROOT" || exit 1
 
-# init script. Runs as pid 1 from initramfs to set up and hand off system.
+# Write init script. Runs as pid 1 from initramfs to set up and hand off system.
 cat > "$ROOT"/init << 'EOF' &&
 #!/bin/sh
 
-export HOME=/home
-export PATH=/bin:/sbin
+export HOME=/home PATH=/bin:/sbin
 
 mountpoint -q proc || mount -t proc proc proc
 mountpoint -q sys || mount -t sysfs sys sys
-if ! mountpoint -q dev
-then
+if ! mountpoint -q dev; then
   mount -t devtmpfs dev dev || mdev -s
-  mkdir -p dev/pts
+  for i in ,fd /0,stdin /1,stdout /2,stderr
+  do ln -sf /proc/self/fd${i/,*/} dev/${i/*,/}; done
+  mkdir -p dev/{shm,pts}
   mountpoint -q dev/pts || mount -t devpts dev/pts dev/pts
+  chmod +t /dev/shm
 fi
 
-if [ $$ -eq 1 ]
-then
-  # Setup networking for QEMU (needs /proc)
+if [ $$ -eq 1 ]; then # Setup networking for QEMU (needs /proc)
+  ifconfig lo 127.0.0.1
   ifconfig eth0 10.0.2.15
   route add default gw 10.0.2.2
-  [ "$(date +%s)" -lt 1000 ] && rdate 10.0.2.2 # or time-b.nist.gov
-  [ "$(date +%s)" -lt 10000000 ] && ntpd -nq -p north-america.pool.ntp.org
+  [ "$(date +%s)" -lt 1000 ] && timeout 2 sntp -sq 10.0.2.2 # Ask host
+  [ "$(date +%s)" -lt 10000000 ] && sntp -sq time.google.com
 
-  [ -z "$CONSOLE" ] &&
-    CONSOLE="$(sed -n 's@.* console=\(/dev/\)*\([^ ]*\).*@\2@p' /proc/cmdline)"
+  # Run package scripts (if any)
+  [ -e /etc/rc ] && for i in $(echo /etc/rc/* | sort); do . $i; done
 
+  [ -z "$CONSOLE" ] && CONSOLE="$(</sys/class/tty/console/active)"
   [ -z "$HANDOFF" ] && HANDOFF=/bin/sh && echo Type exit when done.
-  [ -z "$CONSOLE" ] && CONSOLE=console
-  exec /sbin/oneit -c /dev/"$CONSOLE" $HANDOFF
-else
+  exec oneit -c /dev/"${CONSOLE:-console}" $HANDOFF
+else # for chroot
   /bin/sh
   umount /dev/pts /dev /sys /proc
 fi
 EOF
 chmod +x "$ROOT"/init &&
 
-# /etc/passwd with both kernel special accounts (root and nobody) + guest user
+# Google's nameserver, passwd+group with special (root/nobody) accounts + guest
+echo "nameserver 8.8.8.8" > "$ROOT"/etc/resolv.conf &&
 cat > "$ROOT"/etc/passwd << 'EOF' &&
-root::0:0:root:/home/root:/bin/sh
+root:x:0:0:root:/root:/bin/sh
 guest:x:500:500:guest:/home/guest:/bin/sh
 nobody:x:65534:65534:nobody:/proc/self:/dev/null
 EOF
+echo -e 'root:x:0:\nguest:x:500:\nnobody:x:65534:' > "$ROOT"/etc/group || exit 1
 
-# /etc/group with groups corresponding to each /etc/passwd user
-cat > "$ROOT"/etc/group << 'EOF' &&
-root:x:0:
-guest:x:500:
-nobody:x:65534:
-EOF
-
-# /etc/resolv.conf using Google's public nameserver. (We could use QEMU's
-# 10.0.2.2 forwarder here, but this way works in both chroot and QEMU.)
-echo "nameserver 8.8.8.8" > "$ROOT"/etc/resolv.conf || exit 1
-
-# Build toybox
-
-make clean
-if [ -z .config ]
-then
-  make defconfig
-  # Work around musl-libc design flaw.
-  [ "${CROSS_BASE/fdpic//}" != "$CROSS_BASE" ] &&
-    sed -i 's/.*\(CONFIG_TOYBOX_MUSL_NOMMU_IS_BROKEN\).*/\1=y/' .config
-else
-  make silentoldconfig
-fi
+# Build static toybox with existing .config if there is one, else defconfig+sh
+announce toybox
+[ -e .config ] && CONF=silentoldconfig || unset CONF
+make clean ${CONF:-defconfig KCONFIG_ALLCONFIG=<(echo $'CONFIG_SH=y\nCONFIG_ROUTE=y')} &&
 LDFLAGS=--static PREFIX="$ROOT" make toybox install || exit 1
 
-# Abort early if no kernel source specified
-if [ -z "$LINUX" ] || [ ! -d "$LINUX/kernel" ]
-then
+# Build any packages listed on command line
+for i in $PKG; do
+  announce "$i"; PATH="$PKGDIR:$PATH" source $i; [ $? -ne 0 ] && die $i
+done
+
+if [ -z "$LINUX" ] || [ ! -d "$LINUX/kernel" ]; then
   echo 'No $LINUX directory, kernel build skipped.'
-  rmdir "$MYBUILD" "$BUILD" 2>/dev/null
-  exit 0
-fi
-
-# Which architecture are we building a kernel for?
-[ -z "$TARGET" ] && TARGET="${CROSS_BASE/-*/}"
-[ -z "$TARGET" ] && TARGET="$(uname -m)"
-
-# Target-specific info in an (alphabetical order) if/else staircase
-# Each target needs board config, serial console, RTC, ethernet, block device.
-
-if [ "$TARGET" == armv5l ]
-then
-
-  # This could use the same VIRT board as armv7, but let's demonstrate a
-  # different one requiring a separate device tree binary.
-  QEMU="qemu-system-arm -M versatilepb -net nic,model=rtl8139 -net user"
-  KARCH=arm
-  KARGS="console=ttyAMA0"
-  VMLINUX=arch/arm/boot/zImage
-  KERNEL_CONFIG="
-CONFIG_CPU_ARM926T=y
-CONFIG_MMU=y
-CONFIG_VFP=y
-CONFIG_ARM_THUMB=y
-CONFIG_AEABI=y
-CONFIG_ARCH_VERSATILE=y
-
-# The switch to device-tree-only added this mess
-CONFIG_ATAGS=y
-CONFIG_DEPRECATED_PARAM_STRUCT=y
-CONFIG_ARM_ATAG_DTB_COMPAT=y
-CONFIG_ARM_ATAG_DTB_COMPAT_CMDLINE_EXTEND=y
-
-CONFIG_SERIAL_AMBA_PL011=y
-CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
-
-CONFIG_RTC_CLASS=y
-CONFIG_RTC_DRV_PL031=y
-CONFIG_RTC_HCTOSYS=y
-
-CONFIG_PCI=y
-CONFIG_PCI_VERSATILE=y
-CONFIG_BLK_DEV_SD=y
-CONFIG_SCSI=y
-CONFIG_SCSI_LOWLEVEL=y
-CONFIG_SCSI_SYM53C8XX_2=y
-CONFIG_SCSI_SYM53C8XX_DMA_ADDRESSING_MODE=0
-CONFIG_SCSI_SYM53C8XX_MMIO=y
-
-CONFIG_NET_VENDOR_REALTEK=y
-CONFIG_8139CP=y
-"
-  DTB=arch/arm/boot/dts/versatile-pb.dtb
-elif [ "$TARGET" == armv7l ] || [ "$TARGET" == aarch64 ]
-then
-  if [ "$TARGET" == aarch64 ]
-  then
-    QEMU="qemu-system-aarch64 -M virt -cpu cortex-a57"
-    KARCH=arm64
-    VMLINUX=arch/arm64/boot/Image
-  else
-    QEMU="qemu-system-arm -M virt"
-    KARCH=arm
-    VMLINUX=arch/arm/boot/zImage
-  fi
-  KARGS="console=ttyAMA0"
-  KERNEL_CONFIG="
-CONFIG_MMU=y
-CONFIG_ARCH_MULTI_V7=y
-CONFIG_ARCH_VIRT=y
-CONFIG_SOC_DRA7XX=y
-CONFIG_ARCH_OMAP2PLUS_TYPICAL=y
-CONFIG_ARCH_ALPINE=y
-CONFIG_ARM_THUMB=y
-CONFIG_VDSO=y
-CONFIG_CPU_IDLE=y
-CONFIG_ARM_CPUIDLE=y
-CONFIG_KERNEL_MODE_NEON=y
-
-CONFIG_SERIAL_AMBA_PL011=y
-CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
-
-CONFIG_RTC_CLASS=y
-CONFIG_RTC_HCTOSYS=y
-CONFIG_RTC_DRV_PL031=y
-
-CONFIG_NET_CORE=y
-CONFIG_VIRTIO_MENU=y
-CONFIG_VIRTIO_NET=y
-
-CONFIG_PCI=y
-CONFIG_PCI_HOST_GENERIC=y
-CONFIG_VIRTIO_BLK=y
-CONFIG_VIRTIO_PCI=y
-CONFIG_VIRTIO_MMIO=y
-
-CONFIG_ATA=y
-CONFIG_ATA_SFF=y
-CONFIG_ATA_BMDMA=y
-CONFIG_ATA_PIIX=y
-
-CONFIG_PATA_PLATFORM=y
-CONFIG_PATA_OF_PLATFORM=y
-CONFIG_ATA_GENERIC=y
-"
-elif [ "$TARGET" == i486 ] || [ "$TARGET" == i686 ] ||
-     [ "$TARGET" == x86_64 ] || [ "$TARGET" == x32 ]
-then
-  if [ "$TARGET" == i486 ]
-  then
-    QEMU="qemu-system-i386 -cpu 486 -global fw_cfg.dma_enabled=false"
-    KERNEL_CONFIG="CONFIG_M486=y"
-  elif [ "$TARGET" == i686 ]
-  then
-    QEMU="qemu-system-i386 -cpu pentium3"
-    KERNEL_CONFIG="CONFIG_MPENTIUMII=y"
-  else
-    QEMU=qemu-system-x86_64
-    KERNEL_CONFIG="CONFIG_64BIT=y"
-    [ "$TARGET" == x32 ] && KERNEL_CONFIG="$KERNEL_CONFIG
-CONFIG_X86_X32=y"
-  fi
-  KARCH=x86
-  KARGS="console=ttyS0"
-  VMLINUX=arch/x86/boot/bzImage
-  CONFIG_MPENTIUMII=y
-  KERNEL_CONFIG="
-$KERNEL_CONFIG
-
-CONFIG_UNWINDER_FRAME_POINTER=y
-
-CONFIG_PCI=y
-CONFIG_BLK_DEV_SD=y
-CONFIG_ATA=y
-CONFIG_ATA_SFF=y
-CONFIG_ATA_BMDMA=y
-CONFIG_ATA_PIIX=y
-
-CONFIG_NET_VENDOR_INTEL=y
-CONFIG_E1000=y
-CONFIG_SERIAL_8250=y
-CONFIG_SERIAL_8250_CONSOLE=y
-CONFIG_RTC_CLASS=y
-"
-elif [ "$TARGET" == mips ] || [ "$TARGET" == mipsel ]
-then
-  QEMU="qemu-system-mips -M malta"
-  KARCH=mips
-  KARGS="console=ttyS0"
-  VMLINUX=vmlinux
-  KERNEL_CONFIG="
-CONFIG_MIPS_MALTA=y
-CONFIG_CPU_MIPS32_R2=y
-CONFIG_SERIAL_8250=y
-CONFIG_SERIAL_8250_CONSOLE=y
-
-CONFIG_PCI=y
-CONFIG_BLK_DEV_SD=y
-CONFIG_ATA=y
-CONFIG_ATA_SFF=y
-CONFIG_ATA_BMDMA=y
-CONFIG_ATA_PIIX=y
-
-CONFIG_NET_VENDOR_AMD=y
-CONFIG_PCNET32=y
-
-CONFIG_POWER_RESET=y
-CONFIG_POWER_RESET_SYSCON=y
-"
-  [ "$TARGET" == mipsel ] &&
-    KERNEL_CONFIG="${KERNEL_CONFIG}CONFIG_CPU_LITTLE_ENDIAN=y" &&
-    QEMU="qemu-system-mipsel -M malta"
-elif [ "$TARGET" == powerpc ]
-then
-  KARCH=powerpc
-  QEMU="qemu-system-ppc -M g3beige"
-  KARGS="console=ttyS0"
-  VMLINUX=vmlinux
-  KERNEL_CONFIG="
-CONFIG_ALTIVEC=y
-CONFIG_PPC_PMAC=y
-CONFIG_PPC_OF_BOOT_TRAMPOLINE=y
-
-CONFIG_IDE=y
-CONFIG_IDE_GD=y
-CONFIG_IDE_GD_ATA=y
-CONFIG_BLK_DEV_IDE_PMAC=y
-CONFIG_BLK_DEV_IDE_PMAC_ATA100FIRST=y
-
-CONFIG_MACINTOSH_DRIVERS=y
-CONFIG_ADB=y
-CONFIG_ADB_CUDA=y
-
-CONFIG_NET_VENDOR_NATSEMI=y
-CONFIG_NET_VENDOR_8390=y
-CONFIG_NE2K_PCI=y
-
-CONFIG_SERIO=y
-CONFIG_SERIAL_PMACZILOG=y
-CONFIG_SERIAL_PMACZILOG_TTYS=y
-CONFIG_SERIAL_PMACZILOG_CONSOLE=y
-CONFIG_BOOTX_TEXT=y
-"
-elif [ "$TARGET" == powerpc64le ]
-then
-  KARCH=powerpc
-  QEMU="qemu-system-ppc64 -M pseries -vga none"
-  KARGS="console=/dev/hvc0"
-  VMLINUX=vmlinux
-  KERNEL_CONFIG="CONFIG_PPC64=y
-CONFIG_PPC_PSERIES=y
-CONFIG_CPU_LITTLE_ENDIAN=y
-CONFIG_PPC_OF_BOOT_TRAMPOLINE=y
-
-CONFIG_BLK_DEV_SD=y
-CONFIG_SCSI_LOWLEVEL=y
-CONFIG_SCSI_IBMVSCSI=y
-CONFIG_ATA=y
-
-CONFIG_NET_VENDOR_IBM=y
-CONFIG_IBMVETH=y
-CONFIG_HVC_CONSOLE=y
-
-# None of this should be necessary
-CONFIG_PPC_TRANSACTIONAL_MEM=y
-CONFIG_PPC_DISABLE_WERROR=y
-CONFIG_SECTION_MISMATCH_WARN_ONLY=y
-"
-elif [ "$TARGET" = s390x ]
-then
-  QEMU="qemu-system-s390x"
-  KARCH=s390
-  VMLINUX=arch/s390/boot/bzImage
-  KERNEL_CONFIG="
-CONFIG_MARCH_Z900=y
-CONFIG_PACK_STACK=y
-CONFIG_NET_CORE=y
-CONFIG_VIRTIO_NET=y
-CONFIG_VIRTIO_BLK=y
-CONFIG_SCLP_TTY=y
-CONFIG_SCLP_CONSOLE=y
-CONFIG_SCLP_VT220_TTY=y
-CONFIG_SCLP_VT220_CONSOLE=y
-CONFIG_S390_GUEST=y
-"
-elif [ "$TARGET" == sh4 ]
-then
-  QEMU="qemu-system-sh4 -M r2d -serial null -serial mon:stdio"
-  KARCH=sh
-  KARGS="console=ttySC1 noiotrap"
-  VMLINUX=arch/sh/boot/zImage
-  KERNEL_CONFIG="
-CONFIG_CPU_SUBTYPE_SH7751R=y
-CONFIG_MMU=y
-CONFIG_MEMORY_START=0x0c000000
-CONFIG_VSYSCALL=y
-CONFIG_SH_FPU=y
-CONFIG_SH_RTS7751R2D=y
-CONFIG_RTS7751R2D_PLUS=y
-CONFIG_SERIAL_SH_SCI=y
-CONFIG_SERIAL_SH_SCI_CONSOLE=y
-
-CONFIG_PCI=y
-CONFIG_NET_VENDOR_REALTEK=y
-CONFIG_8139CP=y
-
-CONFIG_PCI=y
-CONFIG_BLK_DEV_SD=y
-CONFIG_ATA=y
-CONFIG_ATA_SFF=y
-CONFIG_ATA_BMDMA=y
-CONFIG_PATA_PLATFORM=y
-
-CONFIG_BINFMT_ELF_FDPIC=y
-CONFIG_BINFMT_FLAT=y
-
-#CONFIG_SPI=y
-#CONFIG_SPI_SH_SCI=y
-#CONFIG_MFD_SM501=y
-
-#CONFIG_RTC_CLASS=y
-#CONFIG_RTC_DRV_R9701=y
-#CONFIG_RTC_DRV_SH=y
-#CONFIG_RTC_HCTOSYS=y
-"
 else
-  echo "Unknown \$TARGET"
-  exit 1
+  # Which architecture are we building a kernel for?
+  LINUX="$(realpath "$LINUX")"
+  [ -z "$TARGET" ] && TARGET="${CROSS_BASE/-*/}"
+  [ -z "$TARGET" ] && TARGET="$(uname -m)"
+
+  # Target-specific info in an (alphabetical order) if/else staircase
+  # Each target needs board config, serial console, RTC, ethernet, block device.
+
+  if [ "$TARGET" == armv5l ]; then
+    # This could use the same VIRT board as armv7, but let's demonstrate a
+    # different one requiring a separate device tree binary.
+    QEMU="arm -M versatilepb -net nic,model=rtl8139 -net user"
+    KARCH=arm KARGS=ttyAMA0 VMLINUX=arch/arm/boot/zImage
+    KCONF=CPU_ARM926T,MMU,VFP,ARM_THUMB,AEABI,ARCH_VERSATILE,ATAGS,DEPRECATED_PARAM_STRUCT,ARM_ATAG_DTB_COMPAT,ARM_ATAG_DTB_COMPAT_CMDLINE_EXTEND,SERIAL_AMBA_PL011,SERIAL_AMBA_PL011_CONSOLE,RTC_CLASS,RTC_DRV_PL031,RTC_HCTOSYS,PCI,PCI_VERSATILE,BLK_DEV_SD,SCSI,SCSI_LOWLEVEL,SCSI_SYM53C8XX_2,SCSI_SYM53C8XX_MMIO,NET_VENDOR_REALTEK,8139CP
+    KERNEL_CONFIG="CONFIG_SCSI_SYM53C8XX_DMA_ADDRESSING_MODE=0"
+    DTB=arch/arm/boot/dts/versatile-pb.dtb
+  elif [ "$TARGET" == armv7l ] || [ "$TARGET" == aarch64 ]; then
+    if [ "$TARGET" == aarch64 ]; then
+      QEMU="aarch64 -M virt -cpu cortex-a57"
+      KARCH=arm64 VMLINUX=arch/arm64/boot/Image
+    else
+      QEMU="arm -M virt" KARCH=arm VMLINUX=arch/arm/boot/zImage
+    fi
+    KARGS=ttyAMA0
+    KCONF=MMU,ARCH_MULTI_V7,ARCH_VIRT,SOC_DRA7XX,ARCH_OMAP2PLUS_TYPICAL,ARCH_ALPINE,ARM_THUMB,VDSO,CPU_IDLE,ARM_CPUIDLE,KERNEL_MODE_NEON,SERIAL_AMBA_PL011,SERIAL_AMBA_PL011_CONSOLE,RTC_CLASS,RTC_HCTOSYS,RTC_DRV_PL031,NET_CORE,VIRTIO_MENU,VIRTIO_NET,PCI,PCI_HOST_GENERIC,VIRTIO_BLK,VIRTIO_PCI,VIRTIO_MMIO,ATA,ATA_SFF,ATA_BMDMA,ATA_PIIX,PATA_PLATFORM,PATA_OF_PLATFORM,ATA_GENERIC
+  elif [ "$TARGET" == i486 ] || [ "$TARGET" == i686 ] ||
+       [ "$TARGET" == x86_64 ] || [ "$TARGET" == x32 ]; then
+    if [ "$TARGET" == i486 ]; then
+      QEMU="i386 -cpu 486 -global fw_cfg.dma_enabled=false" KCONF=M486
+    elif [ "$TARGET" == i686 ]; then
+      QEMU="i386 -cpu pentium3" KCONF=MPENTIUMII
+    else
+      QEMU=x86_64 KCONF=64BIT
+      [ "$TARGET" == x32 ] && KCONF=X86_X32
+    fi
+    KARCH=x86 KARGS=ttyS0 VMLINUX=arch/x86/boot/bzImage
+    KCONF=$KCONF,UNWINDER_FRAME_POINTER,PCI,BLK_DEV_SD,ATA,ATA_SFF,ATA_BMDMA,ATA_PIIX,NET_VENDOR_INTEL,E1000,SERIAL_8250,SERIAL_8250_CONSOLE,RTC_CLASS
+  elif [ "$TARGET" == m68k ]; then
+    QEMU="m68k -M q800" KARCH=m68k KARGS=ttyS0 VMLINUX=vmlinux
+    KCONF=MMU,M68040,M68KFPU_EMU,MAC,SCSI_MAC_ESP,MACINTOSH_DRIVERS,ADB,ADB_MACII,NET_CORE,MACSONIC,SERIAL_PMACZILOG,SERIAL_PMACZILOG_TTYS,SERIAL_PMACZILOG_CONSOLE
+  elif [ "$TARGET" == mips ] || [ "$TARGET" == mipsel ]; then
+    QEMU="mips -M malta" KARCH=mips KARGS=ttyS0 VMLINUX=vmlinux
+    KCONF=MIPS_MALTA,CPU_MIPS32_R2,SERIAL_8250,SERIAL_8250_CONSOLE,PCI,BLK_DEV_SD,ATA,ATA_SFF,ATA_BMDMA,ATA_PIIX,NET_VENDOR_AMD,PCNET32,POWER_RESET,POWER_RESET_SYSCON
+    [ "$TARGET" == mipsel ] && KCONF=$KCONF,CPU_LITTLE_ENDIAN &&
+      QEMU="mipsel -M malta"
+  elif [ "$TARGET" == powerpc ]; then
+    KARCH=powerpc QEMU="ppc -M g3beige" KARGS=ttyS0 VMLINUX=vmlinux
+    KCONF=ALTIVEC,PPC_PMAC,PPC_OF_BOOT_TRAMPOLINE,IDE,IDE_GD,IDE_GD_ATA,BLK_DEV_IDE_PMAC,BLK_DEV_IDE_PMAC_ATA100FIRST,MACINTOSH_DRIVERS,ADB,ADB_CUDA,NET_VENDOR_NATSEMI,NET_VENDOR_8390,NE2K_PCI,SERIO,SERIAL_PMACZILOG,SERIAL_PMACZILOG_TTYS,SERIAL_PMACZILOG_CONSOLE,BOOTX_TEXT
+  elif [ "$TARGET" == powerpc64le ]; then
+    KARCH=powerpc QEMU="ppc64 -M pseries -vga none" KARGS=/dev/hvc0
+    VMLINUX=vmlinux
+    KCONF=PPC64,PPC_PSERIES,CPU_LITTLE_ENDIAN,PPC_OF_BOOT_TRAMPOLINE,BLK_DEV_SD,SCSI_LOWLEVEL,SCSI_IBMVSCSI,ATA,NET_VENDOR_IBM,IBMVETH,HVC_CONSOLE,PPC_TRANSACTIONAL_MEM,PPC_DISABLE_WERROR,SECTION_MISMATCH_WARN_ONLY
+  elif [ "$TARGET" = s390x ]; then
+    QEMU="s390x" KARCH=s390 VMLINUX=arch/s390/boot/bzImage
+    KCONF=MARCH_Z900,PACK_STACK,NET_CORE,VIRTIO_NET,VIRTIO_BLK,SCLP_TTY,SCLP_CONSOLE,SCLP_VT220_TTY,SCLP_VT220_CONSOLE,S390_GUEST
+  elif [ "$TARGET" == sh2eb ]; then
+    KARCH=sh VMLINUX=vmlinux KERNEL_CONFIG='CONFIG_MEMORY_START=0x10000000
+CONFIG_CMDLINE="console=ttyUL0 earlycon"' BUILTIN=1
+    KCONF=CPU_SUBTYPE_J2,CPU_BIG_ENDIAN,SH_JCORE_SOC,SMP,BINFMT_ELF_FDPIC,JCORE_EMAC,SERIAL_UARTLITE,SERIAL_UARTLITE_CONSOLE,HZ_100,CMDLINE_OVERWRITE,SPI,SPI_JCORE,MMC,PWRSEQ_SIMPLE,MMC_BLOCK,MMC_SPI
+  elif [ "$TARGET" == sh4 ]; then
+    QEMU="sh4 -M r2d -serial null -serial mon:stdio" KARCH=sh
+    KARGS="ttySC1 noiotrap" VMLINUX=arch/sh/boot/zImage
+    KERNEL_CONFIG="CONFIG_MEMORY_START=0x0c000000"
+    KCONF=CPU_SUBTYPE_SH7751R,MMU,VSYSCALL,SH_FPU,SH_RTS7751R2D,RTS7751R2D_PLUS,SERIAL_SH_SCI,SERIAL_SH_SCI_CONSOLE,PCI,NET_VENDOR_REALTEK,8139CP,PCI,BLK_DEV_SD,ATA,ATA_SFF,ATA_BMDMA,PATA_PLATFORM,BINFMT_ELF_FDPIC,BINFMT_FLAT
+#see also SPI SPI_SH_SCI MFD_SM501 RTC_CLASS RTC_DRV_R9701 RTC_DRV_SH RTC_HCTOSYS
+  else die "Unknown \$TARGET"
+  fi
+
+  # Write the qemu launch script
+  if [ ! -z "$QEMU" ]; then
+    [ -z "$BUILTIN" ] && INITRD="-initrd ${CROSS_BASE}root.cpio.gz"
+    echo qemu-system-"$QEMU" '"$@"' $QEMU_MORE -nographic -no-reboot -m 256 \
+         -kernel $(basename $VMLINUX) $INITRD \
+         "-append \"quiet panic=1 HOST=$TARGET console=$KARGS \$KARGS\"" \
+         ${DTB:+-dtb "$(basename "$DTB")"} ";echo -e '\e[?7h'" \
+         > "$OUTPUT/qemu-$TARGET.sh" &&
+    chmod +x "$OUTPUT/qemu-$TARGET.sh" || exit 1
+  fi
+
+  announce "linux-$KARCH"
+  pushd "$LINUX" && make distclean && popd &&
+  cp -sfR "$LINUX" "$MYBUILD/linux" && pushd "$MYBUILD/linux" &&
+
+  # Write miniconfig
+  { echo "# make ARCH=$KARCH allnoconfig KCONFIG_ALLCONFIG=$TARGET.miniconf"
+    echo -e "# make ARCH=$KARCH -j \$(nproc)\n# boot $VMLINUX\n\n"
+    echo "# CONFIG_EMBEDDED is not set"
+
+    # Expand list of =y symbols, first generic then architecture-specific
+    for i in BINFMT_ELF,BINFMT_SCRIPT,NO_HZ,HIGH_RES_TIMERS,BLK_DEV,BLK_DEV_INITRD,RD_GZIP,BLK_DEV_LOOP,EXT4_FS,EXT4_USE_FOR_EXT2,VFAT_FS,FAT_DEFAULT_UTF8,MISC_FILESYSTEMS,SQUASHFS,SQUASHFS_XATTR,SQUASHFS_ZLIB,DEVTMPFS,DEVTMPFS_MOUNT,TMPFS,TMPFS_POSIX_ACL,NET,PACKET,UNIX,INET,IPV6,NETDEVICES,NET_CORE,NETCONSOLE,ETHERNET,COMPAT_32BIT_TIME,EARLY_PRINTK,IKCONFIG,IKCONFIG_PROC $KCONF ; do
+      echo "# architecture ${X:-independent}"
+      sed -E '/^$/d;s/([^,]*)($|,)/CONFIG_\1=y\n/g' <<< "$i"
+      X=specific
+    done
+    [ ! -z "$BUILTIN" ] && echo -e CONFIG_INITRAMFS_SOURCE="\"$OUTPUT/fs\""
+    echo "$KERNEL_CONFIG"
+  } > "$OUTPUT/miniconfig-$TARGET" &&
+  make ARCH=$KARCH allnoconfig KCONFIG_ALLCONFIG="$OUTPUT/miniconfig-$TARGET" &&
+
+  # Second config pass to remove stupid kernel defaults
+  # See http://lkml.iu.edu/hypermail/linux/kernel/1912.3/03493.html
+  sed -e 's/# CONFIG_EXPERT .*/CONFIG_EXPERT=y/' -e "$(sed -E -e '/^$/d' \
+    -e 's@([^,]*)($|,)@/^CONFIG_\1=y/d;$a# CONFIG_\1 is not set/\n@g' \
+       <<< VT,SCHED_DEBUG,DEBUG_MISC,X86_DEBUG_FPU)" -i .config &&
+  yes "" | make ARCH=$KARCH oldconfig > /dev/null &&
+
+  # Build kernel. Copy config, device tree binary, and kernel binary to output
+  make ARCH=$KARCH CROSS_COMPILE="$CROSS_COMPILE" -j $(nproc) &&
+  cp .config "$OUTPUT/linux-fullconfig" || exit 1
+  [ ! -z "$DTB" ] && { cp "$DTB" "$OUTPUT" || exit 1 ;}
+  cp "$VMLINUX" "$OUTPUT" && cd .. && rm -rf linux && popd || exit 1
 fi
 
-# Write the miniconfig file
-{
-  echo "# make ARCH=$KARCH allnoconfig KCONFIG_ALLCONFIG=$TARGET.miniconf"
-  echo "# make ARCH=$KARCH -j \$(nproc)"
-  echo "# boot $VMLINUX"
-  echo
-  echo "$KERNEL_CONFIG"
-
-  # Generic options for all targets
-
-  echo "
-# CONFIG_EMBEDDED is not set
-CONFIG_EARLY_PRINTK=y
-CONFIG_BINFMT_ELF=y
-CONFIG_BINFMT_SCRIPT=y
-CONFIG_NO_HZ=y
-CONFIG_HIGH_RES_TIMERS=y
-
-CONFIG_BLK_DEV=y
-CONFIG_BLK_DEV_INITRD=y
-CONFIG_RD_GZIP=y
-
-CONFIG_BLK_DEV_LOOP=y
-CONFIG_EXT4_FS=y
-CONFIG_EXT4_USE_FOR_EXT2=y
-CONFIG_VFAT_FS=y
-CONFIG_FAT_DEFAULT_UTF8=y
-CONFIG_MISC_FILESYSTEMS=y
-CONFIG_SQUASHFS=y
-CONFIG_SQUASHFS_XATTR=y
-CONFIG_SQUASHFS_ZLIB=y
-CONFIG_DEVTMPFS=y
-CONFIG_DEVTMPFS_MOUNT=y
-CONFIG_TMPFS=y
-CONFIG_TMPFS_POSIX_ACL=y
-
-CONFIG_NET=y
-CONFIG_PACKET=y
-CONFIG_UNIX=y
-CONFIG_INET=y
-CONFIG_IPV6=y
-CONFIG_NETDEVICES=y
-#CONFIG_NET_CORE=y
-#CONFIG_NETCONSOLE=y
-CONFIG_ETHERNET=y
-"
-} > "$OUTPUT/miniconfig-$TARGET"
-
-# Write the qemu launch script
-echo "$QEMU -nographic -no-reboot -m 256" \
-     "-append \"panic=1 HOST=$TARGET $KARGS\"" \
-     "-kernel $(basename "$VMLINUX") -initrd ${CROSS_BASE}root.cpio.gz" \
-     ${DTB:+-dtb "$(basename "$DTB")"} '"$@"' \
-     > "$OUTPUT/qemu-$TARGET.sh" &&
-chmod +x "$OUTPUT/qemu-$TARGET.sh" &&
-
-echo "Build linux for $KARCH"
-
-# Snapshot Linux source dir and clean it
-cp -sfR "$LINUX" "$MYBUILD/linux" && pushd "$MYBUILD/linux" > /dev/null ||
-  exit 1
-
-# Build kernel
-make distclean &&
-make ARCH=$KARCH allnoconfig KCONFIG_ALLCONFIG="$OUTPUT/miniconfig-$TARGET" &&
-make ARCH=$KARCH CROSS_COMPILE="$CROSS_COMPILE" -j $(nproc) || exit 1
-
-# If we have a device tree binary, save it for QEMU.
-if [ ! -z "$DTB" ]
-then
-  cp "$DTB" "$OUTPUT/$(basename "$DTB")" || exit 1
-fi
-
-cp "$VMLINUX" "$OUTPUT/$(basename "$VMLINUX")" && cd .. && rm -rf linux &&
-  popd || exit 1
-rmdir "$MYBUILD" "$BUILD" 2>/dev/null
-
-# package root filesystem for initramfs.
-# we do it here so module install can add files (not implemented yet)
-echo === create "${CROSS_BASE}root.cpio.gz"
-
-(cd "$ROOT" && find . | cpio -o -H newc | gzip) > \
-  "$OUTPUT/${CROSS_BASE}root.cpio.gz"
+# clean up and package root filesystem for initramfs.
+[ -z "$BUILTIN" ] && announce "${CROSS_BASE}root.cpio.gz" &&
+  (cd "$ROOT" && find . | cpio -o -H newc --no-preserve-owner | gzip) \
+    > "$OUTPUT/$CROSS_BASE"root.cpio.gz
+rmdir "$MYBUILD" "$BUILD" 2>/dev/null # remove if empty

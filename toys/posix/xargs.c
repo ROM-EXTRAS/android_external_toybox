@@ -55,38 +55,35 @@ GLOBALS(
 static char *handle_entries(char *data, char **entry)
 {
   if (TT.delim) {
-    char *save, *s = data;
+    char *save, *ss, *s;
 
     // Chop up whitespace delimited string into args
-    while (*s) {
-      while (isspace(*s)) {
-        if (entry) *s = 0;
-        s++;
-      }
-
-      if (TT.n && TT.entries >= TT.n)
-        return *s ? s : (char *)1;
-
+    for (s = data; *s; TT.entries++) {
+      while (isspace(*s)) s++;
+      if (TT.n && TT.entries >= TT.n) return *s ? s : (char *)1;
       if (!*s) break;
-      save = s;
+      save = ss = s;
 
-      // We ought to add sizeof(char *) to TT.bytes to be correct, but we don't
-      // for bug compatibility with busybox 1.30.1 and findutils 4.7.0.
-
+      // Specifying -s can cause "argument too long" errors.
+      if (!FLAG(s)) TT.bytes += sizeof(void *)+1;
       for (;;) {
-        if (++TT.bytes >= TT.s && TT.s) return save;
+        if (++TT.bytes >= TT.s) return save;
         if (!*s || isspace(*s)) break;
         s++;
       }
-      if (TT.E && strstart(&save, TT.E)) return (char *)2;
-      if (entry) entry[TT.entries] = save;
-      ++TT.entries;
+      if (TT.E && strstart(&ss, TT.E) && ss == s) return (char *)2;
+      if (entry) {
+        entry[TT.entries] = save;
+        if (*s) *s++ = 0;
+      }
     }
 
   // -0 support
   } else {
-    TT.bytes += sizeof(char *)+strlen(data)+1;
-    if ((TT.s && TT.bytes >= TT.s) || (TT.n && TT.entries >= TT.n)) return data;
+    long bytes = TT.bytes+sizeof(char *)+strlen(data)+1;
+
+    if (bytes >= TT.s || (TT.n && TT.entries >= TT.n)) return data;
+    TT.bytes = bytes;
     if (entry) entry[TT.entries] = data;
     TT.entries++;
   }
@@ -97,17 +94,16 @@ static char *handle_entries(char *data, char **entry)
 void xargs_main(void)
 {
   struct double_list *dlist = 0, *dtemp;
-  int entries, bytes, done = 0, ran_once = 0, status;
+  int entries, bytes, done = 0, status;
   char *data = 0, **out;
-  pid_t pid;
+  pid_t pid = 0;
 
   // POSIX requires that we never hit the ARG_MAX limit, even if we try to
   // with -s. POSIX also says we have to reserve 2048 bytes "to guarantee
   // that the invoked utility has room to modify its environment variables
   // and command line arguments and still be able to invoke another utility",
   // though obviously that's not really something you can guarantee.
-  bytes = sysconf(_SC_ARG_MAX) - environ_bytes() - 2048;
-  if (!TT.s || TT.s > bytes) TT.s = bytes;
+  if (!FLAG(s)) TT.s = sysconf(_SC_ARG_MAX) - environ_bytes() - 4096;
 
   TT.delim = '\n'*!FLAG(0);
 
@@ -119,9 +115,9 @@ void xargs_main(void)
   }
 
   // count entries
-  for (entries = 0, bytes = -1; entries < toys.optc; entries++, bytes++)
-    bytes += strlen(toys.optargs[entries]);
-  if (bytes >= TT.s) error_exit("argument too long");
+  for (entries = 0, bytes = -1; entries < toys.optc; entries++)
+    bytes += strlen(toys.optargs[entries])+1+sizeof(char *)*!FLAG(s);
+  if (bytes >= TT.s) error_exit("command too long");
 
   // Loop through exec chunks.
   while (data || !done) {
@@ -133,11 +129,11 @@ void xargs_main(void)
 
       // Read line
       if (!data) {
-        ssize_t l = 0;
-        if (getdelim(&data, (size_t *)&l, TT.delim, stdin)<0) {
+        size_t l = 0;
+
+        if (getdelim(&data, &l, TT.delim, stdin)<0) {
           data = 0;
           done++;
-
           break;
         }
       }
@@ -154,7 +150,7 @@ void xargs_main(void)
 
     if (!TT.entries) {
       if (data) error_exit("argument too long");
-      else if (ran_once) return;
+      else if (pid) return;
       else if (FLAG(r)) continue;
     }
 
@@ -202,14 +198,8 @@ void xargs_main(void)
 
     // Abritrary number of execs, can't just leak memory each time...
 skip:
-    ran_once = 1;
-    while (dlist) {
-      struct double_list *dtemp = dlist->next;
-
-      free(dlist->data);
-      free(dlist);
-      dlist = dtemp;
-    }
+    llist_traverse(dlist, llist_free_double);
+    dlist = 0;
     free(out);
   }
   if (TT.tty) fclose(TT.tty);

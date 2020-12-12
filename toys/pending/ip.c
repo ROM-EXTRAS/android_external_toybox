@@ -181,11 +181,13 @@ static void send_nlmesg(int type, int flags, int family,
 // Parse /etc/iproute2/RPDB_tables and prepare list.
 static void parseRPDB(char *fname, struct arglist **list, int32_t size)
 {
-  char *line;
-  int fd = open(fname, O_RDONLY);
+  FILE *fp = fopen(fname, "r");
+  char *line = 0;
+  size_t l = 0;
+  ssize_t len;
 
-  if (fd < 0) return;
-  for (; (line = get_line(fd)); free(line)) {
+  if (!fp) return;
+  while ((len = getline(&line, &l, fp)) > 0) {
     char *ptr = line;
     int32_t idx;
 
@@ -195,10 +197,8 @@ static void parseRPDB(char *fname, struct arglist **list, int32_t size)
         (sscanf(ptr, "0x%x %s #", &idx, toybuf) != 2) &&
         (sscanf(ptr, "%d %s\n", &idx, toybuf) != 2) &&
         (sscanf(ptr, "%d %s #", &idx, toybuf) != 2)) {
-      error_msg("Corrupted '%s' file", fname);
-      xclose(fd);
-      free(line);
-      return;
+      error_msg("corrupt %s", fname);
+      break;
     }
     if (idx >= 0 && idx < size) {
       int index = idx & (size-1);
@@ -208,7 +208,8 @@ static void parseRPDB(char *fname, struct arglist **list, int32_t size)
       list[index]->name = xstrdup(toybuf);
     }
   }
-  xclose(fd);
+  free(line);
+  fclose(fp);
 }
 
 static void free_alist(struct arglist **list)
@@ -1446,7 +1447,7 @@ static int ipaddr_print( struct linkdata *link, int flag_l)
         }
 
         for (; NLMSG_OK(addr_ptr, len); addr_ptr = NLMSG_NEXT(addr_ptr, len)) {
-          if ((addr_ptr->nlmsg_type == RTM_NEWADDR))
+          if (addr_ptr->nlmsg_type == RTM_NEWADDR)
             print_addrinfo(addr_ptr, flag_l);
           if ((addr_ptr->nlmsg_type == NLMSG_DONE) ||
               (addr_ptr->nlmsg_type == NLMSG_ERROR) ||
@@ -1498,15 +1499,13 @@ struct {
 
 static void show_iproute_help(void)
 {
-  char *errmsg = "\n\n" \
+  error_exit("\n\n" \
        "iproute { list | flush } SELECTOR\n" \
        "iproute get ADDRESS [from ADDRESS iif STRING]\n" \
        "	[oif STRING]\n" \
        "iproute { add | del | change | append | replace | test } ROUTE\n" \
        "	SELECTOR := [root PREFIX] [match PREFIX] [proto RTPROTO]\n" \
-       "	ROUTE := [TYPE] PREFIX [proto RTPROTO] [metric METRIC]";
-
-  error_exit(errmsg);
+       "	ROUTE := [TYPE] PREFIX [proto RTPROTO] [metric METRIC]");
 }
 
 static void print_rta_metrics(char* out, const struct rtattr *mxattr)
@@ -2173,12 +2172,10 @@ static int iproute(char **argv)
 // ===========================================================================
 static void show_iprule_help(void)
 {
-  char *errmsg = "usage: ip rule [ list | add | del ] SELECTOR ACTION\n"
+  error_exit("usage: ip rule [ list | add | del ] SELECTOR ACTION\n"
     "SELECTOR := [ from PREFIX ] [ to PREFIX ] [pref NUMBER] [ tos TOS ]\n"
     "            [ fwmark FWMARK] [ dev/iif STRING ] [type TYPE]\n"
-    "ACTION := [ table TABLE_ID ] [ realms [SRCREALM/]DSTREALM ]";
-
-  error_exit(errmsg);
+    "ACTION := [ table TABLE_ID ] [ realms [SRCREALM/]DSTREALM ]");
 }
 
 static int ruleupdate(char **argv)
@@ -2422,12 +2419,10 @@ static int iprule(char **argv)
 //============================================================================
 static void show_iptunnel_help(void)
 {
-  char *errmsg = "usage: iptunnel { add | change | del | show } [NAME]\n"
+  error_exit("usage: iptunnel { add | change | del | show } [NAME]\n"
     "           [mode { ipip | gre | sit }] [remote ADDR] [local ADDR]\n"
     "           [[i|o]seq] [[i|o]key KEY] [[i|o]csum] [ttl TTL]\n"
-    "           [tos TOS] [[no]pmtudisc] [dev PHYS_DEV]";
-
-  error_exit(errmsg);
+    "           [tos TOS] [[no]pmtudisc] [dev PHYS_DEV]");
 }
 
 static int tnl_ioctl(char *dev, int rtype, struct ip_tunnel_parm *ptnl)

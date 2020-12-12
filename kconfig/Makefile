@@ -18,7 +18,7 @@ oldconfig: $(obj)/conf $(KCONFIG_TOP)
 	$< -o $(KCONFIG_TOP)
 
 silentoldconfig: $(obj)/conf $(KCONFIG_TOP)
-	yes | $< -o $(KCONFIG_TOP) > /dev/null
+	yes '' | $< -o $(KCONFIG_TOP) > /dev/null
 
 randconfig: $(obj)/conf $(KCONFIG_TOP)
 	$< -r $(KCONFIG_TOP) > /dev/null
@@ -29,8 +29,9 @@ allyesconfig: $(obj)/conf $(KCONFIG_TOP)
 allnoconfig: $(obj)/conf $(KCONFIG_TOP)
 	$< -n $(KCONFIG_TOP) > /dev/null
 
+KCONFIG_ALLCONFIG ?= /dev/null
 defconfig: $(obj)/conf $(KCONFIG_TOP)
-	$< -D /dev/null $(KCONFIG_TOP) > /dev/null
+	$< -D $(KCONFIG_ALLCONFIG) $(KCONFIG_TOP) > /dev/null
 
 macos_defconfig: $(obj)/conf $(KCONFIG_TOP)
 	KCONFIG_ALLCONFIG=$(obj)/macos_miniconfig $< -n $(KCONFIG_TOP) > /dev/null

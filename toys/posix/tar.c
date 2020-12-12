@@ -17,13 +17,13 @@
  * Why --exclude pattern but no --include? tar cvzf a.tgz dir --include '*.txt'
  *
 
-USE_TAR(NEWTOY(tar, "&(restrict)(full-time)(no-recursion)(numeric-owner)(no-same-permissions)(overwrite)(exclude)*(mode):(mtime):(group):(owner):(to-command):o(no-same-owner)p(same-permissions)k(keep-old)c(create)|h(dereference)x(extract)|t(list)|v(verbose)J(xz)j(bzip2)z(gzip)S(sparse)O(to-stdout)m(touch)X(exclude-from)*T(files-from)*C(directory):f(file):a[!txc][!jzJa]", TOYFLAG_USR|TOYFLAG_BIN))
+USE_TAR(NEWTOY(tar, "&(restrict)(full-time)(no-recursion)(numeric-owner)(no-same-permissions)(overwrite)(exclude)*(mode):(mtime):(group):(owner):(to-command):o(no-same-owner)p(same-permissions)k(keep-old)c(create)|h(dereference)x(extract)|t(list)|v(verbose)J(xz)j(bzip2)z(gzip)S(sparse)O(to-stdout)P(absolute-names)m(touch)X(exclude-from)*T(files-from)*C(directory):f(file):a[!txc][!jzJa]", TOYFLAG_USR|TOYFLAG_BIN))
 
 config TAR
   bool "tar"
   default y
   help
-    usage: tar [-cxt] [-fvohmjkOS] [-XTCf NAME] [FILES]
+    usage: tar [-cxt] [-fvohmjkOS] [-XTCf NAME] [FILE...]
 
     Create, extract, or list files in a .tar (or compressed t?z) file.
 
@@ -38,7 +38,7 @@ config TAR
     --mode MODE      Adjust modes           --mtime TIME  Override timestamps
     --owner NAME     Set file owner to NAME --group NAME  Set file group to NAME
     --sparse         Record sparse files
-    --restrict       All archive contents must extract under one subdirctory
+    --restrict       All archive contents must extract under one subdirectory
     --numeric-owner  Save/use/display uid and gid, not user/group name
     --no-recursion   Don't store directory contents
 */
@@ -164,12 +164,12 @@ static void skippy(long long len)
 static void alloread(void *buf, int len)
 {
   // actually void **, but automatic typecasting doesn't work with void ** :(
-  void **b = buf;
+  char **b = buf;
 
   free(*b);
   *b = xmalloc(len+1);
   xreadall(TT.fd, *b, len);
-  b[len] = 0;
+  (*b)[len] = 0;
 }
 
 // callback from dirtree to create archive
@@ -189,7 +189,7 @@ static int add_to_tar(struct dirtree *node)
   }
 
   i = 1;
-  name = dirtree_path(node, &i);
+  name = hname = dirtree_path(node, &i);
 
   // exclusion defaults to --no-anchored and --wildcards-match-slash
   for (lnk = name; *lnk;) {
@@ -202,7 +202,7 @@ static int add_to_tar(struct dirtree *node)
   if (S_ISDIR(st->st_mode) && name[i-1] != '/') strcat(name, "/");
 
   // remove leading / and any .. entries from saved name
-  for (hname = name; *hname == '/'; hname++);
+  if (!FLAG(P)) while (*hname == '/') hname++;
   for (lnk = hname;;) {
     if (!(lnk = strstr(lnk, ".."))) break;
     if (lnk == hname || lnk[-1] == '/') {
@@ -386,25 +386,32 @@ static void wsettime(char *s, long long sec)
 }
 
 // Do pending directory utimes(), NULL to flush all.
-static int dirflush(char *name)
+static int dirflush(char *name, int isdir)
 {
   char *s = 0, *ss;
 
   // Barf if name not in TT.cwd
   if (name) {
-    ss = s = xabspath(name, -1);
-    if (TT.cwd[1] && (!strstart(&ss, TT.cwd) || *ss!='/')) {
-      error_msg("'%s' not under '%s'", name, TT.cwd);
+    if (!(ss = s = xabspath(name, -1-isdir))) {
+      error_msg("'%s' bad symlink", name);
+
+      return 1;
+    }
+    if (TT.cwd[1] && (!strstart(&ss, TT.cwd) || (*ss && *ss!='/'))) {
+      error_msg("'%s' %s not under '%s'", name, s, TT.cwd);
       free(s);
 
       return 1;
     }
 
+    // --restrict means first entry extracted is what everything must be under
     if (FLAG(restrict)) {
       free(TT.cwd);
       TT.cwd = strdup(s);
       toys.optflags ^= FLAG_restrict;
     }
+    // use resolved name so trailing / is stripped
+    if (isdir) unlink(s);
   }
 
   // Set deferred utimes() for directories this file isn't under.
@@ -467,14 +474,14 @@ static void extract_to_disk(void)
   char *name = TT.hdr.name;
   int ala = TT.hdr.mode;
 
-  if (dirflush(name)) {
+  if (dirflush(name, S_ISDIR(ala))) {
     if (S_ISREG(ala) && !TT.hdr.link_target) skippy(TT.hdr.size);
  
     return;
   }
 
   // create path before file if necessary
-  if (strrchr(name, '/') && mkpath(name) && errno !=EEXIST)
+  if (strrchr(name, '/') && mkpath(name) && errno!=EEXIST)
       return perror_msg(":%s: can't mkdir", name);
 
   // remove old file, if exists
@@ -488,8 +495,9 @@ static void extract_to_disk(void)
         return perror_msg("can't link '%s' -> '%s'", name, TT.hdr.link_target);
     // write contents
     } else {
-      int fd = xcreate(name, O_WRONLY|O_CREAT|(FLAG(overwrite)?O_TRUNC:O_EXCL),
-        WARN_ONLY|(ala & 07777));
+      int fd = xcreate(name,
+        WARN_ONLY|O_WRONLY|O_CREAT|(FLAG(overwrite)?O_TRUNC:O_EXCL),
+        ala & 07777);
       if (fd != -1) sendfile_sparse(fd);
       else skippy(TT.hdr.size);
     }
@@ -841,7 +849,7 @@ void tar_main(void)
         // detect gzip and bzip signatures
         if (SWAP_BE16(*(short *)hdr)==0x1f8b) toys.optflags |= FLAG_z;
         else if (!memcmp(hdr, "BZh", 3)) toys.optflags |= FLAG_j;
-        else if (peek_be(hdr, 7) == 0xfd377a585a0000) toys.optflags |= FLAG_J;
+        else if (peek_be(hdr, 7) == 0xfd377a585a0000UL) toys.optflags |= FLAG_J;
         else error_exit("Not tar");
 
         // if we can seek back we don't need to loop and copy data
@@ -895,7 +903,7 @@ void tar_main(void)
     }
 
     unpack_tar(hdr);
-    dirflush(0);
+    dirflush(0, 0);
 
     // Each time a TT.incl entry is seen it's moved to the end of the list,
     // with TT.seen pointing to first seen list entry. Anything between

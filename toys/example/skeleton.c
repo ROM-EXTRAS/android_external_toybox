@@ -6,6 +6,7 @@
  * See http://pubs.opengroup.org/onlinepubs/9699919799/utilities/
  * See http://refspecs.linuxfoundation.org/LSB_4.1.0/LSB-Core-generic/LSB-Core-generic/cmdbehav.html
  * See https://www.ietf.org/rfc/rfc3.txt
+ * See http://man7.org/linux/man-pages/dir_section_1.html
 
 // Accept many different kinds of command line argument (see top of lib/args.c)
 // Demonstrate two commands in the same file (see www/documentation.html)
@@ -72,9 +73,9 @@ void skeleton_main(void)
   // Command line options parsing is done for you by lib/args.c called
   // from main.c using the optstring in the NEWTOY macros. Display results.
   if (toys.optflags) printf("flags=%llx\n", toys.optflags);
-  if (toys.optflags & FLAG_a) printf("Saw a\n");
-  if (toys.optflags & FLAG_b) printf("b=%s\n", TT.s.b);
-  if (toys.optflags & FLAG_c) printf("c=%ld\n", TT.s.c);
+  if (FLAG(a)) printf("Saw a\n");
+  if (FLAG(b)) printf("b=%s\n", TT.s.b);
+  if (FLAG(c)) printf("c=%ld\n", TT.s.c);
   while (TT.s.d) {
     printf("d=%s\n", TT.s.d->arg);
     TT.s.d = TT.s.d->next;
@@ -82,7 +83,7 @@ void skeleton_main(void)
   if (TT.s.e) printf("e was seen %ld times\n", TT.s.e);
   for (optargs = toys.optargs; *optargs; optargs++)
     printf("optarg=%s\n", *optargs);
-  if (toys.optflags & FLAG_walrus) printf("Saw --walrus\n");
+  if (FLAG(walrus)) printf("Saw --walrus\n");
   if (TT.s.blubber) printf("--blubber=%s\n", TT.s.blubber);
 
   printf("Other globals should start zeroed: %d\n", TT.more_globals);
@@ -100,5 +101,5 @@ void skeleton_alias_main(void)
 
   // Note, this FLAG_b is a different bit position than the other FLAG_b,
   // and fills out a different variable of a different type.
-  if (toys.optflags & FLAG_b) printf("b=%ld", TT.a.b);
+  if (FLAG(b)) printf("b=%ld", TT.a.b);
 }
